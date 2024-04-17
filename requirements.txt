@@ -1,0 +1,8 @@
+python-pptx
+readability-lxml
+BeautifulSoup
+markdownify
+azure.cognitiveservices.speech
+AzureOpenAI
+python-dotenv
+openai
