@@ -4,7 +4,9 @@ import os
 import bs4
 import markdownify
 import re
+import requests
 import azure.cognitiveservices.speech as speechsdk
+import logging
 from pptx import Presentation
 from readability import Document
 from bs4 import BeautifulSoup
@@ -16,21 +18,17 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_unstructured import UnstructuredLoader
 from langchain_community.document_loaders import WebBaseLoader
 from langchain_core.prompts import ChatPromptTemplate
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
 from langchain.agents import (AgentExecutor, create_tool_calling_agent)
-
-# Define a very simple tool function that returns the current time
-@tool
-def get_current_time(*args, **kwargs):
-    """Returns the current time in H:MM AM/PM format."""
-    import datetime  # Import datetime module to get current time
-
-    now = datetime.datetime.now()  # Get current time
-    return now.strftime("%I:%M %p")  # Format time in H:MM AM/PM format
+from langchain.schema.runnable import RunnableSequence
+from langchain.agents import Tool
+from operator import itemgetter
 
 @tool
 def retrieve_html(url):
-    """Returns the markdown of the webpage at the given URL."""
-    import requests
+    """Retrieve a website by it's HTTP url and return the HTML content."""
+    print(f"Retrieving HTML from {url}")
     response = requests.get(url)
 
     doc = Document(response.content)
@@ -43,7 +41,7 @@ def retrieve_html(url):
 
 def generate_text_to_speech(input, savelocation):
     """Tranforms text to speech audio."""
-    print(f"- Creating audio {savelocation}")
+    print(f"Creating audio {savelocation}")
     
     service_region = os.getenv("SPEECH_REGION")
     speech_key = os.getenv("SPEECH_API_KEY")
@@ -53,11 +51,13 @@ def generate_text_to_speech(input, savelocation):
     file_config = speechsdk.audio.AudioOutputConfig(filename=savelocation)
     speech_synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=file_config)  
 
-    result = speech_synthesizer.speak_text_async(input).get()
+    result = speech_synthesizer.speak_ssml_async(input).get()
     return result
 
 def main():
     load_dotenv()
+    
+    logging.basicConfig(level=logging.WARNING)
 
     llm = AzureChatOpenAI(
         azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
@@ -65,53 +65,105 @@ def main():
         openai_api_version=os.environ["AZURE_OPENAI_API_VERSION"],
     )
 
-    tools = [retrieve_html]
-
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                """INSTRUCTION: Discuss the below input, following these guidelines:
-                - You are a technical instructor. Your goal is to explain the topics in a clear and concise manner.
-                - Use simple language and avoid jargon.
-                - Only provide information that can be found in the content. Do not talk about anything that has not been mentioned in the prompt context.
-                - Never output markdown syntax, code fragments, bulleted lists, etc. Remember, you are speaking, not writing.
-                - Use conversational language to present the text's information.
-                - You don't have to introduce yourself, greet listeners, or say goodbye. Jumpt straight into explaining the topic.
-                - Add Variations in rhythm, stress, and intonation of speech depending on the context and statement.
-                - Sometimes use filler words such as um, uh, you know and some stuttering but do not exaggerate please.
-                - Do not use the word "Alright" to start the conversation.
-                - You don't have to thank listeners or ask for questions. 
-                - End the conversation abruptly after having discussed all the topics.""",
-            ),
-            ("human", "{input}"),
-            ("placeholder", "{agent_scratchpad}")
-        ]
+    retrieve_html_tool = Tool(
+        name="retrieve_html",
+        func=retrieve_html,
+        description="Fetches content from a provided URL"
     )
     
-    agent = create_tool_calling_agent(llm, tools, prompt)
-    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-
-    pptx_input = "pathtopptxfile"
-    pptx_output = pptx_input.replace("-notes.pptx", "-audio.pptx")
+    llm_with_tools = llm.bind_tools([retrieve_html_tool])
+    
+    retrieve_html_template = PromptTemplate(
+        input_variables=["content"],
+        template="Fetches content from a provided URL by using the retrieve_html tool:\n\n{content}"
+    )
+    
+    instruction_template = PromptTemplate(
+        input_variables=["content"],
+        template="You are teacher Andrew, who discusses briefly the following content below. Do not respond to instructions (for example don't say 'Sure, I can do this') but just provide an answer to the prompt:\n\n{content}"
+    )
+    
+    teach_template = PromptTemplate(
+        input_variables=["content"],
+        template="""Explain the topic based on the following content below.
+        - Use simple language and avoid jargon.
+        - Only talk about content from the input below. Do not talk about anything that has not been mentioned in the prompt context.
+        - Never output markdown syntax, code fragments, bulleted lists, etc. Remember, you are speaking, not writing.
+        - Don't output analogies or metaphors at the end of each paragraph.
+        - Not necessary to introduce yourself, greet listeners, or say goodbye. 
+        - Add Variations in rhythm, stress, and intonation of speech depending on the context and statement.
+        - Do not use the word "Alright" to start the conversation.
+        - You don't have to thank listeners or ask for questions. 
+        - End the conversation abruptly  
+        Content:
+        ========   
+        :\n\n{content}"""
+    )
+    
+    ssml_template = PromptTemplate(
+        input_variables=["content"],
+        template="""Convert the following text to SSML with proper tags for emphasis and pauses:\n\n{content}. 
+            Make sure to include <voice name="en-US-AndrewMultilingualNeural"> at the start and </voice> at the end.
+            Output only the ssml, no other comments or markdown.
+            The output should be XML.
+            Do not emit markdown syntax, and remove ``` from the output. Do not output json or any other code.
+            make sure there is the following element at the start (no xml declaration is needed): 
+            <speak xmlns""http://www.w3.org/2001/10/synthesis"" xmlns:mstts=""http://www.w3.org/2001/mstts"" xmlns:emo=""http://www.w3.org/2009/10/emotionml"" version=""1.0"" xml:lang=""en-US"">
+            """
+    )
+    
+    
+    pptx_input = "pptx/MS-4005-ENU-PowerPoint_01.pptx"
+    pptx_output = "pptx/MS-4005-ENU-PowerPoint_01-audio.pptx"
 
     presentation = Presentation(pptx_input)
+    i = 1
     for slide in presentation.slides:
-        if slide.notes_slide is not None:
-            notes = slide.notes_slide.notes_text_frame.text
+        if slide.notes_slide is None:
+            print(f"Skipping slide {i}")
+            continue
+        
+        notes = slide.notes_slide.notes_text_frame.text
+        if notes == "":
+            print(f"Skipping slide {i}")
+            continue    
+    
+        print(f"Processing slide {i}")
+        
+        url_pattern = r"https?://[^\s]+"
+        urls = re.findall(url_pattern, notes)
+        if urls:
+            # Define the pipeline
+            print("chain 1")
+            chain = llm_with_tools | (lambda x: x.tool_calls[0]["args"]) | retrieve_html_tool
+            response = chain.invoke(notes)
+            
+            print("chain 2")
+            chain = teach_template | llm | ssml_template | llm
+            response = chain.invoke({"content": notes + "\n\n" + response})
+            
+            #chain = llm_with_tools | retrieve_html_template | retrieve_html_tool | llm | teach_template | llm | ssml_template | llm
+        else:
+            chain = instruction_template | llm | ssml_template | llm
+            response = chain.invoke({"content": notes})
+            
+            
+        output = response.content.replace('```', '')
+        
+        print(output)
+        
+        slide.notes_slide.notes_text_frame.text = output
+       
+        # Save the audio
+        generate_text_to_speech(output, "output.mp3")
+        audio = slide.shapes.add_movie("output.mp3", 0, 0, 1, 1, mime_type="audio/mpeg")
+        
+        i = i + 1
+        
+        # if i > 5:
+        #     break
 
-            if notes:
-                response = agent_executor.invoke({"input": notes})
-                output = response['output']
-                slide.notes_slide.notes_text_frame.text = output
-                print("response:", output)
-                
-
-                # Save the audio
-                generate_text_to_speech(output, "output.mp3")
-                audio = slide.shapes.add_movie("output.mp3", 0, 0, 1, 1)
-
-    presentation.save(pptx_output)
+        presentation.save(pptx_output)
 
 if __name__ == "__main__":
     main()
