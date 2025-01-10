@@ -1,0 +1,7 @@
+langchain
+langchain-openai
+langchain-community 
+beautifulsoup4
+langchain-unstructured
+markdownify
+azure.cognitiveservices.speech
