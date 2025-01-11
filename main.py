@@ -24,6 +24,7 @@ from langchain.agents import (AgentExecutor, create_tool_calling_agent)
 from langchain.schema.runnable import RunnableSequence
 from langchain.agents import Tool
 from operator import itemgetter
+from langchain.globals import set_verbose, set_debug
 
 @tool
 def retrieve_html(url):
@@ -55,9 +56,9 @@ def generate_text_to_speech(input, savelocation):
     return result
 
 def main():
+    set_verbose(True)
+    set_debug(False)
     load_dotenv()
-    
-    logging.basicConfig(level=logging.WARNING)
 
     llm = AzureChatOpenAI(
         azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
@@ -100,6 +101,23 @@ def main():
         :\n\n{content}"""
     )
     
+    question_template = PromptTemplate(
+        input_variables=["content"],
+        template="""
+        - Create a list of 5 open ended questions that can be answered shortly. Make sure that the actual answer is not in the prompt, and can be found in the content.
+        - Create a practice assesment of up to 10 questions. It's OK to have challenging questions, do not make it too obvious. Provide the answer as well. Make sure to generate a mix of multiple choice, true/false (provide the choices), fill-in-the-blanks questions (provide suggestions to choose from).
+        
+        Generate questions and practice assesment.
+        Content:
+        ========   
+        :\n\n{content}"""
+    )
+    
+    #"- The questions should focus on they 'why', not on the 'what' or 'how'."
+    #"- The questions should be thought-provoking and encourage critical thinking."
+    #"- Create one complex problem related to the training content. I will use this to encourage group discussions to solve the problem. "
+    #"- Create a mindmap of all topics covered. Use a hierachical structure as an ASCII tree diagram"
+    
     ssml_template = PromptTemplate(
         input_variables=["content"],
         template="""Convert the following text to SSML with proper tags for emphasis and pauses:\n\n{content}. 
@@ -134,35 +152,35 @@ def main():
         urls = re.findall(url_pattern, notes)
         if urls:
             # Define the pipeline
-            print("chain 1")
-            chain = llm_with_tools | (lambda x: x.tool_calls[0]["args"]) | retrieve_html_tool
-            response = chain.invoke(notes)
+            print("chain: content (url)")
+            content_chain = llm_with_tools | (lambda x: x.tool_calls[0]["args"]) | retrieve_html_tool
+            content_response = content_chain.invoke(notes)
             
-            print("chain 2")
-            chain = teach_template | llm | ssml_template | llm
-            response = chain.invoke({"content": notes + "\n\n" + response})
+            print("chain: teaching")
+            teach_chain = teach_template | llm | ssml_template | llm
+            ssml_response = teach_chain.invoke({"content": notes + "\n\n" + content_response})
+            
+            print("chain: questioning")
+            question_chain = question_template | llm
+            question_response = question_chain.invoke({"content": notes + "\n\n" + content_response})
+            slide.notes_slide.notes_text_frame.text = question_response.content
             
             #chain = llm_with_tools | retrieve_html_template | retrieve_html_tool | llm | teach_template | llm | ssml_template | llm
         else:
-            chain = instruction_template | llm | ssml_template | llm
-            response = chain.invoke({"content": notes})
+            print("chain: instructions")
+            instruction_chain = instruction_template | llm | ssml_template | llm
+            ssml_response = instruction_chain.invoke({"content": notes})
+            slide.notes_slide.notes_text_frame.text = ""
             
-            
-        output = response.content.replace('```', '')
-        
-        print(output)
-        
-        slide.notes_slide.notes_text_frame.text = output
+        ssml_output = ssml_response.content.replace('```', '')
+        #print(ssml_output)
        
         # Save the audio
-        generate_text_to_speech(output, "output.mp3")
+        generate_text_to_speech(ssml_output, "output.mp3")
         audio = slide.shapes.add_movie("output.mp3", 0, 0, 1, 1, mime_type="audio/mpeg")
         
         i = i + 1
         
-        # if i > 5:
-        #     break
-
         presentation.save(pptx_output)
 
 if __name__ == "__main__":
