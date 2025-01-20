@@ -7,3 +7,5 @@ markdownify
 azure.cognitiveservices.speech
 readability-lxml
 lxml_html_clean
+beautifulsoup4
+python-pptx
